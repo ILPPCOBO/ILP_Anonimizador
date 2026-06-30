@@ -1,0 +1,14 @@
+# Solo se publica la carpeta deploy/ (ver vercel.json -> outputDirectory).
+# Excluimos del subido por CLI los archivos grandes/no servidos de la RAÍZ
+# (con / inicial => solo raíz, NO afecta a deploy/).
+/Anonimizador-2.0-PORTABLE.html
+/index.html
+/ocr
+/build_portable.py
+/build_protegido.py
+/*.zip
+/*.pptx
+/*.command
+/*.bat
+/*.sh
+/LEEME.txt
