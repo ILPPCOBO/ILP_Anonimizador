@@ -27,6 +27,8 @@ dirección, código postal, matrícula, IP, nombres de persona, firmas manuscrit
 | `abrir-anonimizador.command` / `.bat` / `.sh` | Lanzadores: arrancan un servidor local (Mac/Windows/Linux). |
 | `LEEME.txt` | Guía de uso y solución de problemas. |
 | `build_portable.py` | Regenera `Anonimizador-2.0-PORTABLE.html` desde `index.html` + `ocr/`. |
+| `deploy/` | Versión **protegida con contraseña** (contenido cifrado) lista para desplegar. Es lo que sirve el auto-deploy. |
+| `build_protegido.py` | Regenera `deploy/` cifrando `index.html` con una contraseña (`python3 build_protegido.py "clave"`). |
 
 ## Uso
 
