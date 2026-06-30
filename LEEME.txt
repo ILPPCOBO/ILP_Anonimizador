@@ -1,0 +1,89 @@
+============================================================
+  ANONIMIZADOR  —  guía rápida
+============================================================
+
+QUÉ ES
+  Una herramienta que anonimiza datos personales (DNI, NIE, CIF, IBAN,
+  teléfono, email, dirección, nombres de persona, etc.) en textos y PDFs.
+  Funciona 100% en tu navegador: tus documentos NO salen de tu equipo.
+  No necesita internet (salvo el botón opcional "Activar NER").
+
+------------------------------------------------------------
+CÓMO ABRIRLO
+------------------------------------------------------------
+
+  ► LO MÁS SIMPLE (cualquier sistema):
+    Doble clic en  index.html
+    Se abre en tu navegador. Es un único archivo autocontenido: puedes
+    copiarlo a un USB, enviarlo por correo o ponerlo en una carpeta
+    compartida y se abrirá igual en otro ordenador.
+
+  ► SI EL MODO "Varios documentos" O LOS PDF NO RESPONDEN al abrir con
+    doble clic (algún navegador limita los Web Workers en file://),
+    usa un lanzador con servidor local (más fiable):
+
+        macOS    →  doble clic en  abrir-anonimizador.command
+                    (la 1ª vez: clic derecho ▸ Abrir ▸ Abrir)
+        Windows  →  doble clic en  abrir-windows.bat
+        Linux    →  ejecuta        abrir-linux.sh
+                    (o en terminal:  bash abrir-linux.sh)
+
+    Estos lanzadores arrancan un servidor LOCAL (solo tu equipo,
+    127.0.0.1) y abren el navegador. Si no tienes Python instalado,
+    abren el archivo directamente.
+
+------------------------------------------------------------
+PRIVACIDAD / SIN FUGAS
+------------------------------------------------------------
+  • Sin servidor remoto y sin telemetría: nada se sube a internet.
+  • Para máxima seguridad: apaga el wifi y ábrelo; funciona igual
+    (la prueba de que nada se filtra).
+  • Lo único que toca internet es el botón opcional "Activar NER"
+    (descarga un modelo de IA; aun así tu documento NO se sube).
+
+------------------------------------------------------------
+REQUISITOS Y COMPATIBILIDAD
+------------------------------------------------------------
+  • Un navegador moderno (Chrome, Edge, Firefox o Safari). Nada más.
+  • Archivos admitidos: texto (.txt, .md, .csv, .json, .log…) y PDF
+    de los DOS tipos:
+       - PDF con texto  → se lee directo (rápido, funciona por doble clic).
+       - PDF escaneado/imagen → se lee con OCR automático en español.
+         · El OCR está en la carpeta "ocr" (100% offline, no descarga nada).
+         · Necesita abrirse con el LANZADOR (servidor local), porque los
+           navegadores bloquean el OCR al abrir con doble clic (file://).
+         · Es más lento (unos segundos por página) y la precisión depende
+           de la calidad del escaneo.
+  • NO admitidos: DOCX.
+
+------------------------------------------------------------
+SI macOS BLOQUEA EL LANZADOR ("no se puede comprobar si tiene
+malware" / "desarrollador no identificado")
+------------------------------------------------------------
+  Es normal: el lanzador es un script y no está firmado por Apple.
+  No es peligroso (puedes abrirlo con un editor y leerlo). Para
+  permitirlo, elige UNA opción:
+
+  A) SIN AVISOS (lo más fiable):
+     1. Abre la app "Terminal".
+     2. Escribe:  bash    (y un espacio)
+     3. Arrastra "abrir-anonimizador.command" a la ventana de Terminal.
+     4. Pulsa Enter. (Ejecutarlo así NO dispara el aviso de macOS.)
+
+  B) Clic derecho:
+     Clic derecho sobre "abrir-anonimizador.command" -> Abrir -> Abrir.
+     (En macOS Sequoia: doble clic, luego Ajustes del Sistema ->
+      Privacidad y Seguridad -> "Abrir de todos modos".)
+
+  C) Quitar el bloqueo una vez (Terminal):
+     xattr -d com.apple.quarantine "/ruta/abrir-anonimizador.command"
+
+  ────────────────────────────────────────────────────────
+  ATAJO QUE EVITA TODO ESTO: usa "Anonimizador-2.0-PORTABLE.html".
+  Lee PDFs escaneados con OCR por DOBLE CLIC, sin lanzador y sin
+  ningún aviso (los .html no los bloquea macOS).
+  ────────────────────────────────────────────────────────
+
+============================================================
+  Tus datos se quedan en tu máquina. Disfrútalo.
+============================================================
