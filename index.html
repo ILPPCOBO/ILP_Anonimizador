@@ -115,6 +115,7 @@
         <button data-mode="redact" class="active">Redactar ████</button>
         <button data-mode="tag">Etiquetar [TIPO_1]</button>
         <button data-mode="pseudo">Seudónimo</button>
+        <button data-mode="delete">Eliminar</button>
       </div>
       <label class="file btn"><input type="file" id="fileIn" accept=".txt,.md,.csv,.json,.log,.pdf" />📄 Subir archivo (.txt/.pdf)</label>
       <button class="btn" id="exampleBtn">Cargar ejemplo</button>
@@ -122,7 +123,26 @@
       <button class="btn" id="copyBtn">Copiar resultado</button>
       <button class="btn" id="dlBtn">Descargar .txt</button>
       <button class="btn" id="dlPdfBtn">Descargar .pdf</button>
+      <button class="btn" id="dlDocxBtn">Descargar .docx</button>
       <button class="btn" id="clearBtn">🗑️ Limpiar</button>
+    </div>
+    <div class="toolbar" id="entBar" style="margin-top:-4px">
+      <label class="chip" style="cursor:pointer"><input type="checkbox" id="entChk" /> 🏢 Anonimizar empresas / entidades</label>
+      <span class="muted" style="font-size:13px">Modo:</span>
+      <select class="sel" id="entMode" title="Estricto: todo. Contractual: conserva el rol. Ligero: solo partes principales.">
+        <option value="contractual">Contractual (rol)</option>
+        <option value="estricto">Estricto</option>
+        <option value="ligero">Ligero</option>
+      </select>
+      <span class="muted" style="font-size:13px">Etiquetas:</span>
+      <select class="sel" id="entLabel" title="Auto: por rol si se detecta con confianza, si no neutra.">
+        <option value="auto">Auto</option>
+        <option value="rol">Por rol</option>
+        <option value="neutra">Neutras</option>
+      </select>
+      <label class="chip" style="cursor:pointer" title="Incluir organismos públicos (Registro Mercantil, AEPD, ministerios, tribunales...)"><input type="checkbox" id="entInst" /> Incluir organismos</label>
+      <button class="btn" id="entCsvBtn" disabled>⬇ Tabla entidades (.csv)</button>
+      <button class="btn" id="entMapBtn" disabled title="Mapping privado original→etiqueta. CONFIDENCIAL: no lo compartas con el documento anonimizado.">⬇ Mapping privado (.json)</button>
     </div>
     <div class="grid">
       <div class="card">
@@ -135,6 +155,7 @@
       </div>
     </div>
     <div class="stats" id="stats"></div>
+    <div id="entReview" class="hidden"></div>
   </section>
 
   <!-- ===================== VISTA: VARIOS DOCUMENTOS ===================== -->
@@ -145,7 +166,9 @@
         <option value="redact">Redactar ████</option>
         <option value="tag">Etiquetar [TIPO_1]</option>
         <option value="pseudo">Seudónimo</option>
+        <option value="delete">Eliminar</option>
       </select>
+      <label class="chip" style="cursor:pointer" title="Anonimiza empresas/entidades con etiqueta CONSISTENTE en todo el lote (misma empresa → misma etiqueta en todos los documentos). Usa Modo/Etiquetas de «Un documento»."><input type="checkbox" id="entChkB" /> 🏢 Empresas (lote)</label>
       <span class="muted" style="font-size:13px">Salida PDF:</span>
       <select class="sel" id="pdfOut" title="Cómo se devuelven los PDF">
         <option value="text">Texto regenerado</option>
@@ -159,6 +182,7 @@
       <button class="btn primary" id="batchZip" disabled>⬇ Descargar todo (.zip)</button>
       <button class="btn" id="batchEach" disabled>⬇ Descargar cada uno</button>
       <button class="btn" id="batchCsv" disabled>⬇ Informe (.csv)</button>
+      <button class="btn" id="entMapB" disabled title="Mapping privado de entidades de TODO el lote (CONFIDENCIAL, no compartir con los documentos)">⬇ Entidades lote (.json)</button>
       <button class="btn" id="batchRemove" disabled>🗑 Quitar seleccionados</button>
       <button class="btn" id="batchClear" disabled>Limpiar</button>
     </div>
@@ -410,7 +434,14 @@ function anonymize(text,regions,mode){
     var value=text.slice(reg.start,reg.end);
     var key=reg.type+"::"+value.replace(/\s+/g," ").trim().toUpperCase();
     var repl;
-    if(mode==="redact"){var len=Math.max(3,Math.min(14,value.replace(/\s/g,"").length));repl="█".repeat(len);}
+    if(mode==="delete"){repl="";}
+    else if(reg.coreKey){ // entidad corporativa: respeta el modo elegido, consistente por entidad
+      if(mode==="redact"){var lenE=Math.max(3,Math.min(14,value.replace(/\s/g,"").length));repl="█".repeat(lenE);}
+      else if(mode==="pseudo"){var ek=reg.type+"::"+reg.coreKey;if(!(ek in pseudoMap))pseudoMap[ek]=fakeForEntity(reg.type,reg.coreKey);repl=pseudoMap[ek];}
+      else{repl=reg.label;}
+    }
+    else if(reg.label){repl=reg.label;}
+    else if(mode==="redact"){var len=Math.max(3,Math.min(14,value.replace(/\s/g,"").length));repl="█".repeat(len);}
     else if(mode==="tag"){if(!(key in tagMap)){tagCounters[reg.type]=(tagCounters[reg.type]||0)+1;tagMap[key]="["+reg.type+"_"+tagCounters[reg.type]+"]";}repl=tagMap[key];}
     else{if(!(key in pseudoMap))pseudoMap[key]=fakeFor(reg.type,key);repl=pseudoMap[key];}
     counts[reg.type]=(counts[reg.type]||0)+1;
@@ -434,6 +465,337 @@ function runEngine(text,mode,types){
   var r=anonymize(text,regions,mode);
   return {outText:r.outText,counts:r.counts,regionCount:regions.length};
 }
+
+/* ============================================================
+   CAPA DE ENTIDADES CORPORATIVAS (empresas / grupos / marcas)
+   Aditiva: no altera DET/resolve/anonymize. Pura y testeable.
+   Depende de: deaccent (definido en engineSrc), DET (para datos conectados).
+   ============================================================ */
+
+/* --- Sufijos societarios (ES + internacional), con/ sin puntos ni espacios --- */
+var CO_SUF="(?:S\\.?\\s?L\\.?\\s?U|S\\.?\\s?L\\.?\\s?L|S\\.?\\s?L|S\\.?\\s?A\\.?\\s?U|S\\.?\\s?A\\.?\\s?S|S\\.?\\s?A\\.?\\s?R\\.?\\s?L|S\\.?\\s?A|S\\.?\\s?Coop|S\\.?\\s?C|C\\.?\\s?B|S\\.?\\s?p\\.?\\s?A|L\\.?\\s?L\\.?\\s?C|L\\.?\\s?L\\.?\\s?P|Ltda|Ltd|Limited|Incorporated|Inc|Corp|GmbH|PLC|B\\.?V|N\\.?V|SARL|SAS|AG|SpA|AB|A\\/S|AS|Oy|UTE)\\.?";
+var CO_SUF_TAIL=new RegExp("[\\s,]*(?:"+CO_SUF+")\\s*$","i");
+var CO_LONGFORM=/\b(sociedad\s+(?:limitada|an[oó]nima)(?:\s+(?:unipersonal|laboral))?|uni[oó]n\s+temporal\s+de\s+empresas|comunidad\s+de\s+bienes|sociedad\s+(?:cooperativa|civil|de\s+responsabilidad\s+limitada))\b/gi;
+var CO_PREFIX="(?:Grupo|Holding|Fundaci[oó]n|Asociaci[oó]n|Corporaci[oó]n|Consorcio)";
+var GROUP_WORDS=new Set(["grupo","holding","corporacion","consorcio"]);
+
+/* --- Pistas de rol contractual -> etiqueta por rol --- */
+var ROLE_CUES=[
+  {re:/licenciatari|licensee/i, role:"LICENCIATARIO"},
+  {re:/licenciante|licensor/i, role:"LICENCIANTE"},
+  {re:/arrendatari|lessee|tenant|inquilin/i, role:"ARRENDATARIO"},
+  {re:/arrendador|lessor/i, role:"ARRENDADOR"},
+  {re:/proveedor|prestador|suministrador|contratista|supplier/i, role:"PROVEEDOR"},
+  {re:/comprador|adquirente|buyer/i, role:"COMPRADOR"},
+  {re:/vendedor|transmitente|seller|vendor/i, role:"VENDEDOR"},
+  {re:/inversor|investor/i, role:"INVERSOR"},
+  {re:/cliente|customer|client/i, role:"CLIENTE"},
+  {re:/contraparte|counterparty/i, role:"CONTRAPARTE"}
+];
+function roleFromWindow(w){for(var i=0;i<ROLE_CUES.length;i++){if(ROLE_CUES[i].re.test(w))return ROLE_CUES[i].role;}return null;}
+
+/* --- Palabras genéricas: nunca son el núcleo distintivo de una empresa --- */
+var CO_GENERIC=new Set(["empresa","empresas","sociedad","sociedades","grupo","holding","compania","company","group","cliente","clientes","proveedor","proveedores","servicio","servicios","service","services","producto","productos","product","products","solutions","solution","solucion","soluciones","technologies","technology","tecnologia","tecnologias","tech","consulting","consultores","consultoria","consultants","international","internacional","global","iberia","espana","spain","europe","europa","corporation","corporacion","corp","enterprise","enterprises","partners","partner","associates","asociados","industries","industria","industrias","systems","system","sistemas","digital","media","capital","investments","inversiones","retail","logistics","logistica","comercial","comercializadora","distribuciones","distribucion","gestion","proyectos","obras","construcciones","construccion","seguros","banco","banca","financiera","finance","del","los","las","and","the","for","com","www","sociedad","limitada","anonima"]);
+
+/* --- Proveedores de email personales (no corporativos): no ligar como empresa --- */
+var FREE_EMAIL=new Set(["gmail","hotmail","outlook","yahoo","icloud","live","msn","aol","protonmail","proton","gmx","mail","yandex","me","hey","zoho"]);
+
+/* --- Organismos públicos / autoridades: NO anonimizar salvo modo estricto de instituciones --- */
+var PUBLIC_BODY_RE=/\b(registro\s+mercantil|agencia\s+(?:espa[ñn]ola|estatal|tributaria)|agencia\s+espa[ñn]ola\s+de\s+protecci[oó]n\s+de\s+datos|aepd|a\.?e\.?a\.?t|hacienda|seguridad\s+social|tesorer[íi]a\s+general|bolet[íi]n\s+oficial|b\.?o\.?e\b|ministerio|ayuntamiento|diputaci[oó]n|generalitat|xunta|junta\s+de\s+andaluc|gobierno|tribunal|juzgado|audiencia\s+(?:nacional|provincial)|fiscal[íi]a|comisi[oó]n\s+nacional|banco\s+de\s+espa[ñn]a|comisi[oó]n\s+europea|parlamento|senado|congreso\s+de\s+los\s+diputados|universidad|colegio\s+de\s+abogados|direcci[oó]n\s+general|instituto\s+nacional|organizaci[oó]n\s+mundial|naciones\s+unidas)\b/i;
+
+function pad3(n){n=String(n);while(n.length<3)n="0"+n;return n;}
+
+/* Quita sufijo societario / prefijo de grupo -> nombre "núcleo" */
+function coStrip(name){
+  var n=name.replace(/^[\s"'«(\[]+/,"").replace(/[\s"'»)\].,;:]+$/,"");
+  n=n.replace(CO_SUF_TAIL,"");
+  n=n.replace(CO_LONGFORM,"");
+  n=n.replace(new RegExp("^"+CO_PREFIX+"\\s+","i"),"");
+  return n.replace(/[\s,]+$/,"").trim();
+}
+/* Tokens significativos (distintivos) de un nombre de empresa */
+function sigTokensOf(name){
+  var clean=coStrip(name);
+  var toks=deaccent(clean).split(/[^a-z0-9]+/).filter(Boolean);
+  var sig=toks.filter(function(t){return t.length>=3 && !CO_GENERIC.has(t) && !/^\d+$/.test(t);});
+  if(sig.length===0)sig=toks.filter(function(t){return t.length>=2 && !CO_GENERIC.has(t);});
+  if(sig.length===0)sig=toks.slice();
+  return sig;
+}
+function coreKey(name){return sigTokensOf(name).slice().sort().join(" ");}
+function isPublicBody(text){return PUBLIC_BODY_RE.test(text);}
+var ID_LABELS=new Set(["cif","nif","dni","vat","iban","nrt","nie","nss","num","ref","exp","tel"]);
+ID_LABELS.forEach(function(x){CO_GENERIC.add(x);});
+// ¿parece un nombre de empresa? (tiene al menos una palabra alfabética real; no es un código tipo CIF)
+function looksLikeName(s){
+  var toks=deaccent(s).split(/[^a-z0-9]+/).filter(Boolean);
+  return toks.some(function(t){return /^[a-z]{3,}$/.test(t) && !ID_LABELS.has(t) && !CO_GENERIC.has(t);});
+}
+
+/* --- Detección de menciones de empresa en el texto --- */
+var CAPWORD="[A-ZÁÉÍÓÚÑ0-9&][\\wÁÉÍÓÚÑáéíóúñ&'/\\-]*"; // sin '.' para no encadenar a través de puntos de frase ("Alfa. D. Juan")
+var CONN_W="(?:de|del|la|las|los|y|e|i|of|and|the|von|van|der|du|des|da|do|di)";
+var CONN_B="(?:de|del|la|las|los|of|the|von|van|der|du|des|da|do|di)"; // sin conjunciones (y/e/and): "Grupo Alfa y Beta" = 2 entidades
+function isCapTok(tok){return /^[A-ZÁÉÍÓÚÑ0-9&]/.test(tok);}
+function capTrim(text,s,e){
+  var sub=text.slice(s,e), re=/\S+/g, mm, toks=[];
+  while((mm=re.exec(sub))!==null)toks.push({t:mm[0],i:mm.index});
+  var a=0; while(a<toks.length && !isCapTok(toks[a].t))a++;
+  var b=toks.length-1; while(b>=a && !isCapTok(toks[b].t.replace(/[,.;:)]+$/,"")))b--;
+  if(a>b)return null;
+  var st=s+toks[a].i, en=s+toks[b].i+toks[b].t.length;
+  var sl=text.slice(st,en).replace(/[\s,;:.]+$/,""); en=st+sl.length;
+  return en>st?{start:st,end:en}:null;
+}
+function roleNear(text,start,end){
+  var after=text.slice(end,end+36);
+  var mA=after.match(/^[\s"'»)\]]*[,;(]?\s*(?:en\s+su\s+condici[oó]n\s+de|en\s+calidad\s+de|actuando\s+como|como)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-Za-zñáéíóúÑÁÉÍÓÚ]+)/i);
+  if(mA){var r=roleFromWindow(mA[1]);if(r)return r;}
+  var before=text.slice(Math.max(0,start-30),start);
+  var mB=before.match(/(?:^|[\s(])(?:el|la|los|las)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ]+)\s*$/i);
+  if(mB){var r2=roleFromWindow(mB[1]);if(r2)return r2;}
+  return null;
+}
+function detectCompanies(text){
+  var out=[], seen={};
+  function add(start,end,conf,role,form){
+    if(end<=start)return; var k=start+":"+end; if(seen[k])return; seen[k]=1;
+    out.push({start:start,end:end,type:"EMPRESA",text:text.slice(start,end),confidence:conf,role:role||null,form:form||null});
+  }
+  var m;
+  // A) Nombre (con conectores internos "de/del/y...") + sufijo societario.
+  //    NAMETOK evita que un token interior SEA un sufijo (para no encadenar "Alfa, S.L. y Beta, S.L.").
+  var NAMETOK="(?!(?:"+CO_SUF+")(?:[\\s.,;:)\\]»\"']|$))"+CAPWORD;
+  var NAMESEQ=NAMETOK+"(?:,?\\s+(?:"+NAMETOK+"|"+CONN_W+")){0,7}";
+  var reNS=new RegExp("(^|[\\s(\\[«\"'\\-–—:])("+NAMESEQ+"),?\\s+("+CO_SUF+")(?=$|[\\s.,;:)\\]»\"'])","g");
+  while((m=reNS.exec(text))!==null){
+    var s1=m.index+m[1].length, e1=m.index+m[0].length;
+    add(s1,e1,0.92,roleNear(text,s1,e1),m[3]);
+    reNS.lastIndex=e1;
+  }
+  // B) Prefijo de grupo + nombre  (Grupo Alfa, Holding Beta)
+  var reP=new RegExp("(^|[\\s(\\[«\"'\\-–—:])("+CO_PREFIX+"\\s+"+CAPWORD+"(?:\\s+(?:"+CAPWORD+"|"+CONN_B+")){0,3})","g");
+  while((m=reP.exec(text))!==null){
+    var s2=m.index+m[1].length, e2=m.index+m[0].length;
+    add(s2,e2,0.8,roleNear(text,s2,e2),"GRUPO");
+    reP.lastIndex=e2;
+  }
+  // C) Nombre + ", como <rol>"  (parte del contrato, con o sin sufijo). Sin flag 'i':
+  //    CAPWORD estricto (mayúscula inicial) para no encadenar minúsculas ("con CIF ...").
+  var reAsRole=new RegExp("(^|[\\s(\\[«\"'\\-–—:])("+CAPWORD+"(?:\\s+(?:"+CAPWORD+"|"+CONN_W+")){0,5})\\s*,?\\s+(?:en\\s+su\\s+condici[oó]n\\s+de\\s+|en\\s+calidad\\s+de\\s+|actuando\\s+como\\s+|como\\s+)(?:el\\s+|la\\s+|los\\s+|las\\s+)?(licenciatari\\w*|licenciante|arrendatari\\w*|arrendador\\w*|proveedor\\w*|prestador\\w*|contratista|cliente|comprador\\w*|adquirente|vendedor\\w*|transmitente|inversor\\w*|contraparte|parte\\s+(?:compradora|vendedora))","g");
+  while((m=reAsRole.exec(text))!==null){
+    var s3=m.index+m[1].length, e3=s3+m[2].length, tr=capTrim(text,s3,e3);
+    if(tr&&looksLikeName(text.slice(tr.start,tr.end)))add(tr.start,tr.end,0.7,roleFromWindow(m[3]),null);
+    reAsRole.lastIndex=e3;
+  }
+  // D) "el/la <rol> <Nombre>"  (el proveedor Alfa Technologies)
+  var reRN=new RegExp("(?:^|[\\s(\\[«\"'\\-–—:])(?:el|la|los|las)\\s+(licenciatari\\w*|licenciante|arrendatari\\w*|arrendador\\w*|proveedor\\w*|prestador\\w*|contratista|cliente|comprador\\w*|adquirente|vendedor\\w*|transmitente|inversor\\w*)\\s+("+CAPWORD+"(?:\\s+(?:"+CAPWORD+"|"+CONN_W+")){0,4})","g");
+  while((m=reRN.exec(text))!==null){
+    var nEnd=m.index+m[0].length, nStart=nEnd-m[2].length, tr2=capTrim(text,nStart,nEnd);
+    if(tr2&&looksLikeName(text.slice(tr2.start,tr2.end)))add(tr2.start,tr2.end,0.62,roleFromWindow(m[1]),null);
+  }
+  return out;
+}
+// Segundo paso: ocurrencias "desnudas" (sin sufijo/pista) de tokens ya conocidos
+function expandBareVariants(text,mentions,extraKnown){
+  var known={};
+  mentions.forEach(function(mn){sigTokensOf(mn.text).forEach(function(t){if(t.length>=3)known[t]=1;});});
+  (extraKnown||[]).forEach(function(t){if(t&&t.length>=3)known[t]=1;});
+  if(!Object.keys(known).length)return [];
+  var extra=[], re=new RegExp(CAPWORD+"(?:\\s+"+CAPWORD+"){0,4}","g"), m;
+  while((m=re.exec(text))!==null){
+    var s=m.index, e=s+m[0].length;
+    if(mentions.some(function(mn){return s<mn.end && e>mn.start;}))continue;
+    var toks=deaccent(m[0]).split(/[^a-z0-9]+/).filter(Boolean);
+    if(toks.some(function(t){return known[t];}) && looksLikeName(m[0]))
+      extra.push({start:s,end:e,type:"EMPRESA",text:m[0],confidence:0.5,role:null,form:null});
+  }
+  return extra;
+}
+
+/* --- núcleo del dominio de un email/URL --- */
+function domainCore(host){
+  host=deaccent(host).replace(/^www\./,"").replace(/^@/,"");
+  var labels=host.split(".").filter(Boolean);
+  if(labels.length>=2)labels=labels.slice(0,labels.length-1); // quita TLD
+  var toks=[];
+  labels.forEach(function(l){l.split(/[^a-z0-9]+/).forEach(function(t){if(t.length>=3&&!CO_GENERIC.has(t))toks.push(t);});});
+  return toks;
+}
+
+// Atribuye el rol contractual de una cláusula ("..., como cliente" / "el proveedor X")
+// a la EMPRESA más cercana, saltando campos intermedios (CIF, direcciones, etc.).
+function attachRoles(text,entities){
+  var ROLES="(licenciatari\\w*|licenciante|arrendatari\\w*|arrendador\\w*|proveedor\\w*|prestador\\w*|suministrador\\w*|contratista|cliente\\w*|customer|client|comprador\\w*|adquirente|buyer|vendedor\\w*|transmitente|seller|vendor|inversor\\w*|investor|contraparte|counterparty)";
+  function nearBefore(pos){var best=null,bd=1e9;entities.forEach(function(e){e.mentions.forEach(function(mn){var d=pos-mn.end;if(d>=0&&d<bd){bd=d;best=e;}});});return bd<=110?best:null;}
+  function nearAfter(pos){var best=null,bd=1e9;entities.forEach(function(e){e.mentions.forEach(function(mn){var d=mn.start-pos;if(d>=0&&d<bd){bd=d;best=e;}});});return bd<=45?best:null;}
+  var m,e,r;
+  var reB=new RegExp("(?:en\\s+su\\s+condici[oó]n\\s+de|en\\s+calidad\\s+de|actuando\\s+como|,\\s*como|\\bcomo)\\s+(?:el\\s+|la\\s+|los\\s+|las\\s+)?"+ROLES,"gi");
+  while((m=reB.exec(text))!==null){e=nearBefore(m.index);r=roleFromWindow(m[1]);if(e&&r&&!e.role)e.role=r;}
+  var reA=new RegExp("(?:^|[\\s(])(?:el|la|los|las)\\s+"+ROLES+"\\b","gi");
+  while((m=reA.exec(text))!==null){e=nearAfter(m.index+m[0].length);r=roleFromWindow(m[1]);if(e&&r&&!e.role)e.role=r;}
+  var reT=new RegExp("\\bthe\\s+"+ROLES,"gi");
+  while((m=reT.exec(text))!==null){e=nearAfter(m.index+m[0].length)||nearBefore(m.index);r=roleFromWindow(m[1]);if(e&&r&&!e.role)e.role=r;}
+}
+
+/* ============================================================
+   analyzeEntities(text, opts, registry)
+   opts: {mode:'estricto'|'contractual'|'ligero', labelStyle:'auto'|'neutra'|'rol',
+          includeInstitutions:false, docId:'', excludeKeys:Set, mergeMap:{coreKey->coreKey}, overrides:{coreKey->label}}
+   registry: objeto persistente para consistencia entre documentos (lote). Se muta.
+   ============================================================ */
+function analyzeEntities(text,opts,registry){
+  opts=opts||{}; var mode=opts.mode||"contractual", labelStyle=opts.labelStyle||"auto";
+  registry=registry||{seq:0,roleSeq:{},byCore:{}};
+  registry.byCore=registry.byCore||{}; registry.roleSeq=registry.roleSeq||{}; registry.seq=registry.seq||0;
+  var docId=opts.docId||"doc";
+  var excludeKeys=opts.excludeKeys||{has:function(){return false;}};
+  var mergeMap=opts.mergeMap||{};
+
+  var mentions=detectCompanies(text);
+  var extraKnown=[]; // tokens de entidades ya vistas en el lote (registro global) => detecta menciones desnudas
+  if(registry&&registry.byCore)Object.keys(registry.byCore).forEach(function(ck){ck.split(" ").forEach(function(t){if(t.length>=3)extraKnown.push(t);});});
+  mentions=mentions.concat(expandBareVariants(text,mentions,extraKnown));
+
+  /* agrupar variantes por token distintivo compartido (componentes conexos) */
+  var parent=[]; function find(x){while(parent[x]!==x){parent[x]=parent[parent[x]];x=parent[x];}return x;}
+  function union(a,b){a=find(a);b=find(b);if(a!==b)parent[b]=a;}
+  var sig=mentions.map(function(mn){return sigTokensOf(mn.text);});
+  for(var i=0;i<mentions.length;i++)parent[i]=i;
+  var owner={};
+  for(i=0;i<mentions.length;i++){for(var s=0;s<sig[i].length;s++){var tk=sig[i][s];if(owner[tk]!=null)union(i,owner[tk]);else owner[tk]=i;}}
+  var comps={};
+  for(i=0;i<mentions.length;i++){var rr=find(i);(comps[rr]=comps[rr]||[]).push(i);}
+
+  // clave canónica por componente + fusión manual (mergeMap) -> agrupar por clave final
+  var byCk={};
+  Object.keys(comps).forEach(function(rk){
+    var idxs=comps[rk], allSig={};
+    idxs.forEach(function(k){sig[k].forEach(function(t){allSig[t]=1;});});
+    var ck=Object.keys(allSig).sort().join(" "); if(!ck)ck=deaccent(mentions[idxs[0]].text.trim());
+    if(mergeMap[ck])ck=mergeMap[ck];
+    (byCk[ck]=byCk[ck]||[]).push.apply(byCk[ck],idxs);
+  });
+
+  var entities=[];
+  Object.keys(byCk).forEach(function(ck){
+    var mns=byCk[ck].map(function(k){return mentions[k];});
+    // canónico: preferir mención con sufijo real (no GRUPO); si no, la más larga
+    var canon=mns.slice().sort(function(a,b){
+      return ((b.form&&b.form!=="GRUPO")?1:0)-((a.form&&a.form!=="GRUPO")?1:0) || b.text.length-a.text.length;})[0];
+    var isGroup=mns.some(function(x){return x.form==="GRUPO";}) && !mns.some(function(x){return x.form&&x.form!=="GRUPO";});
+    var role=null,maxc=-1;
+    mns.forEach(function(x){if(x.role&&x.confidence>maxc){role=x.role;maxc=x.confidence;}});
+    var conf=mns.reduce(function(a,x){return Math.max(a,x.confidence);},0);
+    var variants={}; mns.forEach(function(x){var v=x.text.trim();if(v!==canon.text.trim())variants[v]=1;});
+    entities.push({coreKey:ck,baseType:isGroup?"GRUPO":"EMPRESA",role:role,confidence:conf,
+      canonical:canon.text.trim(),variants:Object.keys(variants),mentions:mns,connected:[]});
+  });
+
+  attachRoles(text,entities);
+
+  /* filtros anti-falsos-positivos */
+  entities=entities.filter(function(e){
+    if(!opts.includeInstitutions && isPublicBody(e.canonical))return false;
+    if(!looksLikeName(e.canonical))return false;
+    if(sigTokensOf(e.canonical).length===0)return false;
+    if(excludeKeys.has&&excludeKeys.has(e.coreKey))return false;
+    return true;
+  });
+
+  /* modo ligero: sólo entidades principales (con rol, con sufijo, o con >=2 menciones) */
+  if(mode==="ligero"){
+    entities=entities.filter(function(e){
+      return e.role || e.mentions.some(function(x){return x.form&&x.form!=="GRUPO";}) || e.mentions.length>=2;
+    });
+  }
+
+  /* asignación de etiquetas estables (registry para lote) */
+  function confLevel(c){return c>=0.85?"high":c>=0.6?"medium":"low";}
+  entities.forEach(function(e){
+    var reg=registry.byCore[e.coreKey];
+    if(!reg){
+      registry.seq++;
+      reg={num:registry.seq,baseType:e.baseType,role:null,roleNum:null};
+      registry.byCore[e.coreKey]=reg;
+    }
+    if(e.role && !reg.role){registry.roleSeq[e.role]=(registry.roleSeq[e.role]||0)+1;reg.role=e.role;reg.roleNum=registry.roleSeq[e.role];}
+    e.num=reg.num; e.baseLabel=reg.baseType+"_"+pad3(reg.num);
+    var useRole=(labelStyle==="rol") || (labelStyle==="auto" && (mode==="contractual") && reg.role);
+    if(opts.overrides && opts.overrides[e.coreKey]) e.label=opts.overrides[e.coreKey];
+    else if(useRole && reg.role) e.label="["+reg.role+"_"+pad3(reg.roleNum)+"]";
+    else e.label="["+e.baseLabel+"]";
+    e.confidence_level=confLevel(e.confidence);
+  });
+
+  /* --- datos conectados (CIF/NIF, EMAIL, WEB, DIRECCION) --- */
+  var connSpans=[];
+  ["NIF","EMAIL","WEB","DIRECCION"].forEach(function(t){try{DET[t](text,connSpans);}catch(e){}});
+  function nearestEntity(pos){
+    var best=null,bd=1e9;
+    entities.forEach(function(e){e.mentions.forEach(function(mn){
+      var d=(pos>=mn.start&&pos<=mn.end)?0:Math.min(Math.abs(pos-mn.end),Math.abs(pos-mn.start));
+      if(d<bd){bd=d;best=e;}
+    });});
+    return {e:best,d:bd};
+  }
+  function entityByToken(toks){
+    for(var i=0;i<entities.length;i++){var es=sigTokensOf(entities[i].canonical);
+      for(var a=0;a<toks.length;a++)for(var b=0;b<es.length;b++)if(toks[a]===es[b])return entities[i];
+      // también contra variantes
+      for(var v=0;v<entities[i].variants.length;v++){var vs=sigTokensOf(entities[i].variants[v]);for(a=0;a<toks.length;a++)for(b=0;b<vs.length;b++)if(toks[a]===vs[b])return entities[i];}
+    }
+    return null;
+  }
+  connSpans.forEach(function(sp){
+    var val=text.slice(sp.start,sp.end), ent=null, ctype=null;
+    if(sp.type==="EMAIL"){var at=val.indexOf("@");if(at<0)return;var host=val.slice(at+1);var dc=domainCore(host);if(!dc.length||FREE_EMAIL.has(dc[0]))ent=null;else ent=entityByToken(dc);ctype="EMAIL";}
+    else if(sp.type==="WEB"){var h=val.replace(/^https?:\/\//i,"").replace(/\/.*$/,"");var dc2=domainCore(h);ent=dc2.length?entityByToken(dc2):null;ctype="DOMINIO";}
+    else if(sp.type==="NIF"){var n=nearestEntity(sp.start);var pre=text.slice(Math.max(0,sp.start-14),sp.start);if(n.e&&(n.d<=90||/(?:c\.?i\.?f|n\.?i\.?f|v\.?a\.?t)\b/i.test(pre))){ent=n.e;}ctype="CIF";}
+    else if(sp.type==="DIRECCION"){var n2=nearestEntity(sp.start);var w=text.slice(Math.max(0,sp.start-40),sp.start);if(n2.e&&n2.d<=120&&/(domicili|sede|registered\s+office|con\s+direcci)/i.test(w)){ent=n2.e;}ctype="DOMICILIO";}
+    if(ent&&ctype){ent.connected.push({type:ctype,text:val,start:sp.start,end:sp.end,label:"["+ctype+"_"+ent.baseLabel+"]"});}
+  });
+
+  /* --- regiones a reemplazar + mapping --- */
+  var regions=[], mapping=[];
+  entities.forEach(function(e){
+    e.mentions.forEach(function(mn){regions.push({start:mn.start,end:mn.end,type:"EMPRESA",label:e.label,coreKey:e.coreKey});});
+    e.connected.forEach(function(c){regions.push({start:c.start,end:c.end,type:c.type,label:c.label,coreKey:e.coreKey});});
+    var locs=e.mentions.map(function(mn){return {start:mn.start,end:mn.end};});
+    mapping.push({original_name:e.canonical,variants:e.variants.concat(e.connected.map(function(c){return c.text;})),
+      anonymized_label:e.label,entity_type:e.baseType==="GRUPO"?"group":"company",role:e.role,
+      confidence_level:e.confidence_level,documents_found:[docId],locations:locs,coreKey:e.coreKey});
+  });
+  return {entities:entities,regions:regions,mapping:mapping,registry:registry};
+}
+
+// Seudónimo consistente por entidad (mismo coreKey => mismo nombre falso).
+function fakeForEntity(type,key){
+  var k="ENT::"+key;
+  if(type==="CIF")return fakeFor("NIF",k);
+  if(type==="EMAIL")return fakeFor("EMAIL",k);
+  if(type==="DOMINIO")return fakeFor("WEB",k);
+  if(type==="DOMICILIO")return fakeFor("DIRECCION",k);
+  return fakeFor("DENOMINACION_SOCIAL",k);
+}
+
+/* Aplica reemplazos de entidades (usa region.label). Devuelve texto/HTML/contadores. */
+function applyEntities(text,regions){
+  regions=regions.filter(function(r){return r.end>r.start&&r.label;}).sort(function(a,b){return a.start-b.start||b.end-a.end;});
+  var kept=[],lastEnd=-1;
+  for(var i=0;i<regions.length;i++){if(regions[i].start>=lastEnd){kept.push(regions[i]);lastEnd=regions[i].end;}}
+  var esc=function(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");};
+  var outText="",outHtml="",cur=0,counts={};
+  for(i=0;i<kept.length;i++){var reg=kept[i];var val=text.slice(reg.start,reg.end);
+    counts[reg.type]=(counts[reg.type]||0)+1;
+    outText+=text.slice(cur,reg.start)+reg.label;
+    outHtml+=esc(text.slice(cur,reg.start))+'<span class="repl" title="'+esc(reg.type+": "+val)+'">'+esc(reg.label)+'</span>';
+    cur=reg.end;
+  }
+  outText+=text.slice(cur);outHtml+=esc(text.slice(cur));
+  return {outText:outText,outHtml:outHtml,counts:counts};
+}
+
 </script>
 
 <!-- OCR incrustado (solo en la versión PORTABLE; vacío en la versión normal que usa la carpeta ocr/) -->
@@ -495,8 +857,11 @@ function runEngine(text,mode,types){
 <script>
 "use strict";
 const SRC=document.getElementById('engineSrc').textContent;
-const ENGINE=(new Function(SRC+"\nreturn {DET:DET,resolve:resolve,anonymize:anonymize,runEngine:runEngine,TYPES:TYPES,TYPE_LABEL:TYPE_LABEL,COLORS:COLORS};"))();
-const {DET,resolve,anonymize,TYPES,TYPE_LABEL,COLORS}=ENGINE;
+const ENGINE=(new Function(SRC+"\nreturn {DET:DET,resolve:resolve,anonymize:anonymize,runEngine:runEngine,TYPES:TYPES,TYPE_LABEL:TYPE_LABEL,COLORS:COLORS,detectCompanies:detectCompanies,analyzeEntities:analyzeEntities,applyEntities:applyEntities,sigTokensOf:sigTokensOf,coreKey:coreKey,isPublicBody:isPublicBody};"))();
+const {DET,resolve,anonymize,TYPES,TYPE_LABEL,COLORS,detectCompanies,analyzeEntities,applyEntities,sigTokensOf,coreKey,isPublicBody}=ENGINE;
+Object.assign(TYPE_LABEL,{EMPRESA:"Empresa/Entidad",GRUPO:"Grupo",MARCA:"Marca",CIF:"CIF empresa",DOMINIO:"Dominio",DOMICILIO:"Domicilio"});
+Object.assign(COLORS,{EMPRESA:"#5eead4",GRUPO:"#2dd4bf",MARCA:"#99f6e4",CIF:"#fde68a",DOMINIO:"#7dd3fc",DOMICILIO:"#c4b5fd"});
+const escHtml=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const DEFAULT_OFF=new Set(["NUMERO"]);
 const $=id=>document.getElementById(id);
 
@@ -538,12 +903,20 @@ function detectSingle(text){
 }
 function runSingle(){
   const text=$("input").value;
-  if(!text.trim()){$("output").innerHTML='<span class="muted">Escribe o pega algún texto primero.</span>';$("stats").innerHTML="";return;}
-  const regions=resolve(detectSingle(text));
+  if(!text.trim()){$("output").innerHTML='<span class="muted">Escribe o pega algún texto primero.</span>';$("stats").innerHTML="";lastEnt=null;$("entReview").classList.add("hidden");$("entCsvBtn").disabled=$("entMapBtn").disabled=true;return;}
+  const base=resolve(detectSingle(text));
+  let regions=base, ent=null;
+  if($("entChk").checked){
+    ent=analyzeEntities(text,entOpts());
+    regions=mergeRegions(ent.regions,base);
+  }
   const res=anonymize(text,regions,mode);
   $("output").innerHTML=res.outHtml||'<span class="muted">(sin cambios)</span>';
   window.__lastOut=res.outText;
   renderStats($("stats"),res.counts);
+  lastEnt=ent;
+  renderEntityReview(ent);
+  $("entCsvBtn").disabled=$("entMapBtn").disabled=!(ent&&ent.entities.length);
 }
 function renderStats(el,counts){
   el.innerHTML="";
@@ -556,6 +929,98 @@ function renderStats(el,counts){
     el.append(c);
   });
 }
+
+/* =================== ENTIDADES CORPORATIVAS (empresas / grupos) =================== */
+var lastEnt=null;
+var entState={excluded:new Set(),overrides:{},mergeMap:{}};
+function entOpts(){return {mode:$("entMode").value,labelStyle:$("entLabel").value,includeInstitutions:$("entInst").checked,docId:"doc",excludeKeys:entState.excluded,overrides:entState.overrides,mergeMap:entState.mergeMap};}
+function mergeRegions(ent,base){
+  ent=ent.filter(r=>r.end>r.start).sort((a,b)=>a.start-b.start||b.end-a.end);
+  const kept=[];let last=-1;
+  for(const r of ent){if(r.start>=last){kept.push(r);last=r.end;}}
+  const fb=base.filter(b=>!kept.some(e=>b.start<e.end&&b.end>e.start));
+  return kept.concat(fb).sort((a,b)=>a.start-b.start);
+}
+function confBadge(l){return l==="high"?'<span class="chip">alta</span>':l==="medium"?'<span class="chip warn">media</span>':'<span class="chip danger">baja</span>';}
+function renderEntityReview(ent){
+  const box=$("entReview");
+  if(!ent||!ent.entities.length){box.classList.add("hidden");box.innerHTML="";return;}
+  box.classList.remove("hidden");
+  const ents=ent.entities;
+  let h='<div class="card"><h2>Revisión de entidades ('+ents.length+')</h2>';
+  h+='<div class="note">Revisa antes de exportar: edita la etiqueta, excluye una entidad o fusiónala con otra. El <b>mapping privado</b> es confidencial y NO se incrusta en el documento.</div>';
+  h+='<div style="overflow:auto;margin-top:8px"><table style="width:100%;border-collapse:collapse;font-size:13px">';
+  h+='<tr style="text-align:left;color:var(--muted)"><th style="padding:4px 6px">Anon.</th><th style="padding:4px 6px">Original (variantes)</th><th style="padding:4px 6px">Etiqueta</th><th style="padding:4px 6px">Tipo</th><th style="padding:4px 6px">Rol</th><th style="padding:4px 6px">Ap.</th><th style="padding:4px 6px">Conf.</th><th style="padding:4px 6px">Fusionar con…</th></tr>';
+  ents.forEach(e=>{
+    const others=ents.filter(o=>o.coreKey!==e.coreKey);
+    const conn=e.connected.length?(' · '+e.connected.length+' datos'):'';
+    h+='<tr data-ck="'+encodeURIComponent(e.coreKey)+'" style="border-top:1px solid var(--border)">';
+    h+='<td style="padding:4px 6px"><input type="checkbox" class="entOn" '+(entState.excluded.has(e.coreKey)?'':'checked')+'></td>';
+    h+='<td style="padding:4px 6px" title="'+escHtml(e.variants.join(" · ")||e.canonical)+'">'+escHtml(e.canonical)+'<span class="muted">'+escHtml(e.variants.length?(" +"+e.variants.length+" var."):"")+escHtml(conn)+'</span></td>';
+    h+='<td style="padding:4px 6px"><input class="entLbl sel" style="padding:3px 6px;width:150px" value="'+escHtml(e.label)+'"></td>';
+    h+='<td style="padding:4px 6px">'+(e.baseType==="GRUPO"?"Grupo":"Empresa")+'</td>';
+    h+='<td style="padding:4px 6px">'+escHtml(e.role||"—")+'</td>';
+    h+='<td style="padding:4px 6px">'+e.mentions.length+'</td>';
+    h+='<td style="padding:4px 6px">'+confBadge(e.confidence_level)+'</td>';
+    h+='<td style="padding:4px 6px"><select class="entMerge sel" style="padding:3px 6px"><option value="">—</option>'+others.map(o=>'<option value="'+encodeURIComponent(o.coreKey)+'">'+escHtml(o.canonical)+'</option>').join('')+'</select></td>';
+    h+='</tr>';
+  });
+  h+='</table></div></div>';
+  box.innerHTML=h;
+  box.querySelectorAll('tr[data-ck]').forEach(tr=>{
+    const ck=decodeURIComponent(tr.dataset.ck);
+    tr.querySelector('.entOn').onchange=ev=>{if(ev.target.checked)entState.excluded.delete(ck);else entState.excluded.add(ck);runSingle();};
+    tr.querySelector('.entLbl').onchange=ev=>{const v=ev.target.value.trim();if(v)entState.overrides[ck]=v;else delete entState.overrides[ck];runSingle();};
+    tr.querySelector('.entMerge').onchange=ev=>{const t=ev.target.value?decodeURIComponent(ev.target.value):"";if(t)entState.mergeMap[ck]=t;else delete entState.mergeMap[ck];runSingle();};
+  });
+}
+function entCsv(){
+  if(!lastEnt)return;
+  const rows=[["original","etiqueta","tipo","rol","apariciones","confianza","variantes","datos_conectados"]];
+  lastEnt.entities.forEach(e=>rows.push([e.canonical,e.label,e.baseType,e.role||"",e.mentions.length,e.confidence_level,e.variants.join(" | "),e.connected.map(c=>c.type+":"+c.text).join(" | ")]));
+  const csv=rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(",")).join("\r\n");
+  downloadBlob(new Blob(["﻿"+csv],{type:"text/csv"}),"entidades.csv");
+}
+function entMapping(){
+  if(!lastEnt)return;
+  const payload={aviso:"CONFIDENCIAL — mapping privado original→anonimizado. NO compartir junto al documento anonimizado.",entidades:lastEnt.mapping};
+  downloadBlob(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}),"mapping-privado-CONFIDENCIAL.json");
+}
+/* ---- LOTE: procesado en hilo principal con registro global (misma etiqueta en todos los docs) ---- */
+var batchEntMap={};
+function entOptsBatch(docId){return {mode:$("entMode").value,labelStyle:$("entLabel").value,includeInstitutions:$("entInst").checked,docId:docId||"doc"};}
+function processDocMain(text,mode,types,docId,registry){
+  const enabled=new Set(types);const spans=[];
+  for(const t of TYPES){if(!enabled.has(t))continue;try{DET[t](text,spans);}catch(e){}}
+  const base=resolve(spans);
+  const ent=analyzeEntities(text,entOptsBatch(docId),registry);
+  const res=anonymize(text,mergeRegions(ent.regions,base),mode);
+  ent.entities.forEach(e=>{const g=batchEntMap[e.coreKey]||(batchEntMap[e.coreKey]={original:e.canonical,label:e.label,type:e.baseType,role:e.role,conf:e.confidence_level,docs:{},count:0});
+    g.docs[docId]=1;g.count+=e.mentions.length;g.label=e.label;g.role=e.role;});
+  return {outText:res.outText,counts:res.counts};
+}
+function exportBatchEnt(){
+  const arr=Object.keys(batchEntMap).map(k=>batchEntMap[k]);
+  if(!arr.length)return;
+  const payload={aviso:"CONFIDENCIAL — mapping privado de entidades del LOTE. NO compartir junto a los documentos anonimizados.",
+    entidades:arr.map(g=>({original_name:g.original,anonymized_label:g.label,entity_type:g.type==='GRUPO'?'group':'company',role:g.role,confidence_level:g.conf,documents_found:Object.keys(g.docs),apariciones:g.count}))};
+  downloadBlob(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}),"lote-entidades-mapping-CONFIDENCIAL.json");
+}
+/* ---- Exportar Word (.docx) real: un .docx es un ZIP OOXML; reusamos el ZIP puro (zipStore) ---- */
+function xmlEsc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function textToDocx(text){
+  const paras=String(text).split(/\r?\n/).map(l=>l.length?('<w:p><w:r><w:t xml:space="preserve">'+xmlEsc(l)+'</w:t></w:r></w:p>'):'<w:p/>').join('');
+  const doc='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'+paras+'<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1417" w:right="1701" w:bottom="1417" w:left="1701" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>';
+  const ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+  const rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
+  const enc=new TextEncoder();
+  return zipStore([{name:'[Content_Types].xml',bytes:enc.encode(ct)},{name:'_rels/.rels',bytes:enc.encode(rels)},{name:'word/document.xml',bytes:enc.encode(doc)}]);
+}
+["entChk","entMode","entLabel","entInst"].forEach(id=>$(id).addEventListener("change",()=>{if(id==="entChk"&&!$("entChk").checked){entState.excluded.clear();entState.overrides={};entState.mergeMap={};}runSingle();}));
+$("entCsvBtn").addEventListener("click",entCsv);
+$("entMapBtn").addEventListener("click",entMapping);
+$("entMapB").addEventListener("click",exportBatchEnt);
+$("dlDocxBtn").addEventListener("click",()=>{const t=window.__lastOut||$("input").value||"";if(!t.trim())return;downloadBlob(textToDocx(t),"anonimizado.docx");});
 
 /* =================== VARIOS DOCUMENTOS =================== */
 let batchItems=[]; // {name, size, text, status, outText, counts, total}
@@ -800,6 +1265,7 @@ async function runBatch(){
   $("batchRun").disabled=true;$("batchClear").disabled=true;$("batchCancel").classList.remove('hidden');
   $("batchProgWrap").classList.remove('hidden');
   const bmode=$("batchMode").value, types=enabledTypes(), imgMode=(pdfOutMode==='image');
+  const entOn=$("entChkB").checked, entRegistry={}; if(entOn)batchEntMap={};
   const t0=performance.now();
   let done=0,piiTotal=0,next=0,useWorkers=true; const totalN=queued.length;
   const update=()=>{const pct=Math.round(done/Math.max(1,totalN)*100);$("batchProg").style.width=pct+'%';
@@ -838,6 +1304,7 @@ async function runBatch(){
   }}
   const work=rest.filter(it=>it.status==='queued');
   if(work.length)useWorkers=await testWorkers();
+  if(entOn)useWorkers=false; // entidades: procesar en hilo principal con registro global (consistencia entre docs)
   await new Promise(resolve=>{
     let finished=false;const done1=()=>{if(!finished){finished=true;resolve();}};
     const workers=[];
@@ -863,7 +1330,7 @@ async function runBatch(){
         for(let k=0;k<work.length;k++){
           if(batchCancelled)break;
           const it=work[k];it.status='processing';
-          try{const r=ENGINE.runEngine(it.text,bmode,types);it.outText=r.outText;it.counts=r.counts;it.total=Object.values(r.counts).reduce((a,b)=>a+b,0);it.status='done';piiTotal+=it.total;}
+          try{const r=entOn?processDocMain(it.text,bmode,types,it.name,entRegistry):ENGINE.runEngine(it.text,bmode,types);it.outText=r.outText;it.counts=r.counts;it.total=Object.values(r.counts).reduce((a,b)=>a+b,0);it.status='done';piiTotal+=it.total;}
           catch(e){it.status='error';}
           it.text=null;done++;update();renderFlist();
           if((k&3)===3)await new Promise(r=>setTimeout(r));
@@ -877,6 +1344,7 @@ async function runBatch(){
   const nErr=batchItems.filter(it=>it.status==='error').length, nOk=batchItems.filter(it=>it.status==='done').length;
   if(batchCancelled)showBatchMsg('warn','⏹ Cancelado: '+done+' procesados, '+batchItems.filter(it=>it.status==='queued').length+' en cola. Puedes reanudar.');
   else showBatchMsg(nErr?'warn':'','✅ '+nOk+' OK · '+piiTotal+' datos · '+secs.toFixed(1)+'s'+(nErr?(' · ⚠ '+nErr+' con error (pasa el ratón por «error» para ver el motivo)'):''));
+  if(entOn){const nEnt=Object.keys(batchEntMap).length;$("entMapB").disabled=!nEnt;if(nEnt)showBatchMsg(nErr?'warn':'','✅ '+nOk+' OK · '+piiTotal+' datos · '+nEnt+' entidades corporativas (etiqueta consistente en el lote) · '+secs.toFixed(1)+'s');}
   $("batchCancel").classList.add('hidden');
   renderFlist();setBatchControls();
 }
